@@ -6,6 +6,7 @@ import (
 
 	"github.com/obot-platform/nah/pkg/backend"
 	"github.com/obot-platform/nah/pkg/log"
+	"github.com/obot-platform/nah/pkg/persistence"
 	"github.com/obot-platform/nah/pkg/untriggered"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
@@ -21,6 +22,7 @@ type triggers struct {
 	gvkLookup backend.Backend
 	scheme    *runtime.Scheme
 	watcher   watcher
+	store     persistence.Store
 }
 
 type watcher interface {
@@ -33,6 +35,10 @@ type enqueueTarget struct {
 }
 
 func (m *triggers) invokeTriggers(req Request) {
+	if !m.shouldTrigger(req) {
+		return
+	}
+
 	m.lock.RLock()
 	defer m.lock.RUnlock()
 
@@ -42,7 +48,7 @@ func (m *triggers) invokeTriggers(req Request) {
 			continue
 		}
 		for _, matcher := range matchers {
-			if matcher.Match(req.Namespace, req.Name, req.Object) {
+			if matcher.match(req.Namespace, req.Name, req.Object) {
 				log.Debugf("Triggering [%s] [%v] from [%s] [%v]", et.key, et.gvk, req.Key, req.GVK)
 				_ = m.trigger.Trigger(et.gvk, et.key, 0)
 				break
@@ -65,7 +71,7 @@ func (m *triggers) register(gvk schema.GroupVersionKind, key string, targetGVK s
 		m.matchers[targetGVK] = matchers
 	}
 
-	matcherKey := mr.String()
+	matcherKey := mr.string()
 	if _, ok := matchers[target][matcherKey]; ok {
 		return
 	}
@@ -109,6 +115,7 @@ func (m *triggers) Register(sourceGVK schema.GroupVersionKind, key string, obj r
 // UnregisterAndTrigger will unregister all triggers for the object, both as source and target.
 // If a trigger source matches the object exactly, then the trigger will be invoked.
 func (m *triggers) UnregisterAndTrigger(req Request) {
+	shouldTrigger := m.shouldTrigger(req)
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
@@ -129,9 +136,9 @@ func (m *triggers) UnregisterAndTrigger(req Request) {
 					if remainingMatchers[targetGVK][target] == nil {
 						remainingMatchers[targetGVK][target] = make(map[string]objectMatcher)
 					}
-					remainingMatchers[targetGVK][target][mt.String()] = mt
+					remainingMatchers[targetGVK][target][mt.string()] = mt
 				}
-				if targetGVK == req.GVK && mt.Match(req.Namespace, req.Name, req.Object) {
+				if shouldTrigger && targetGVK == req.GVK && mt.match(req.Namespace, req.Name, req.Object) {
 					log.Debugf("Triggering [%s] [%v] from [%s] [%v] on delete", target.key, target.gvk, req.Key, req.GVK)
 					_ = m.trigger.Trigger(target.gvk, target.key, 0)
 				}
@@ -140,4 +147,13 @@ func (m *triggers) UnregisterAndTrigger(req Request) {
 	}
 
 	m.matchers = remainingMatchers
+}
+
+func (m *triggers) shouldTrigger(req Request) bool {
+	if req.Object != nil {
+		updated, err := m.store.Store(req.Ctx, req.GVK, req.Object.GetResourceVersion())
+		return err != nil || updated
+	}
+
+	return true
 }

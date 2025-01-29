@@ -11,6 +11,7 @@ import (
 	"github.com/obot-platform/nah/pkg/backend"
 	"github.com/obot-platform/nah/pkg/log"
 	"github.com/obot-platform/nah/pkg/merr"
+	"github.com/obot-platform/nah/pkg/persistence"
 	"golang.org/x/exp/maps"
 	"golang.org/x/time/rate"
 	apierror "k8s.io/apimachinery/pkg/api/errors"
@@ -50,7 +51,17 @@ type limiterKey struct {
 	gvk schema.GroupVersionKind
 }
 
-func NewHandlerSet(name string, scheme *runtime.Scheme, backend backend.Backend) *HandlerSet {
+func NewHandlerSet(name string, scheme *runtime.Scheme, backend backend.Backend, dsn string) (*HandlerSet, error) {
+	var store persistence.Store
+	if dsn != "" {
+		var err error
+		store, err = persistence.NewDBStore(dsn)
+		if err != nil {
+			return nil, fmt.Errorf("error opening database store: %w", err)
+		}
+	} else {
+		store = persistence.NewNoOp()
+	}
 	hs := &HandlerSet{
 		name:    name,
 		scheme:  scheme,
@@ -63,6 +74,7 @@ func NewHandlerSet(name string, scheme *runtime.Scheme, backend backend.Backend)
 			trigger:   backend,
 			gvkLookup: backend,
 			scheme:    scheme,
+			store:     store,
 		},
 		save: save{
 			cache:  backend,
@@ -71,7 +83,7 @@ func NewHandlerSet(name string, scheme *runtime.Scheme, backend backend.Backend)
 		watching: map[schema.GroupVersionKind]bool{},
 	}
 	hs.triggers.watcher = hs
-	return hs
+	return hs, nil
 }
 
 func (m *HandlerSet) Start(ctx context.Context) error {

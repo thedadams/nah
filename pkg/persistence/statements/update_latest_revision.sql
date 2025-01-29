@@ -1,0 +1,1 @@
+INSERT INTO nah_latest_revisions(gvk, revision) VALUES ($1, $2) ON CONFLICT (gvk) DO UPDATE set revision = EXCLUDED.revision;

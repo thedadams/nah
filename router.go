@@ -30,6 +30,8 @@ type Options struct {
 	ElectionConfig *leader.ElectionConfig
 	// Defaults to 8888
 	HealthzPort int
+	// DSN to use for persistent store
+	DSN string
 }
 
 func (o *Options) complete() (*Options, error) {
@@ -90,7 +92,7 @@ func DefaultOptions(routerName string, scheme *runtime.Scheme) (*Options, error)
 }
 
 // DefaultRouter The routerName is important as this name will be used to assign ownership of objects created by this
-// router. Specifically the routerName is assigned to the sub-context in the apply actions. Additionally, the routerName
+// router. Specifically, the routerName is assigned to the sub-context in the apply actions. Additionally, the routerName
 // will be used for the leader election lease lock.
 func DefaultRouter(routerName string, scheme *runtime.Scheme) (*router.Router, error) {
 	opts, err := DefaultOptions(routerName, scheme)
@@ -105,5 +107,9 @@ func NewRouter(handlerName string, opts *Options) (*router.Router, error) {
 	if err != nil {
 		return nil, err
 	}
-	return router.New(router.NewHandlerSet(handlerName, opts.Backend.Scheme(), opts.Backend), opts.ElectionConfig, opts.HealthzPort), nil
+	hs, err := router.NewHandlerSet(handlerName, opts.Backend.Scheme(), opts.Backend, opts.DSN)
+	if err != nil {
+		return nil, err
+	}
+	return router.New(hs, opts.ElectionConfig, opts.HealthzPort), nil
 }
