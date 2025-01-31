@@ -1,1 +1,0 @@
-SELECT revision FROM nah_latest_revisions WHERE gvk = $1;

@@ -1,0 +1,1 @@
+DELETE FROM placeholder_matchers WHERE namespace = $1 AND name = $2;

@@ -1,0 +1,1 @@
+SELECT revision FROM nah_latest_revisions WHERE kind = $1;

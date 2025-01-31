@@ -11,7 +11,7 @@ import (
 	"github.com/obot-platform/nah/pkg/backend"
 	"github.com/obot-platform/nah/pkg/log"
 	"github.com/obot-platform/nah/pkg/merr"
-	"github.com/obot-platform/nah/pkg/persistence"
+	"github.com/obot-platform/nah/pkg/triggers"
 	"golang.org/x/exp/maps"
 	"golang.org/x/time/rate"
 	apierror "k8s.io/apimachinery/pkg/api/errors"
@@ -33,7 +33,7 @@ type HandlerSet struct {
 	scheme   *runtime.Scheme
 	backend  backend.Backend
 	handlers handlers
-	triggers triggers
+	triggers *triggers.Triggers
 	save     save
 	onError  ErrorHandler
 
@@ -52,16 +52,6 @@ type limiterKey struct {
 }
 
 func NewHandlerSet(name string, scheme *runtime.Scheme, backend backend.Backend, dsn string) (*HandlerSet, error) {
-	var store persistence.Store
-	if dsn != "" {
-		var err error
-		store, err = persistence.NewDBStore(dsn)
-		if err != nil {
-			return nil, fmt.Errorf("error opening database store: %w", err)
-		}
-	} else {
-		store = persistence.NewNoOp()
-	}
 	hs := &HandlerSet{
 		name:    name,
 		scheme:  scheme,
@@ -69,27 +59,27 @@ func NewHandlerSet(name string, scheme *runtime.Scheme, backend backend.Backend,
 		handlers: handlers{
 			handlers: map[schema.GroupVersionKind][]Handler{},
 		},
-		triggers: triggers{
-			matchers:  map[schema.GroupVersionKind]map[enqueueTarget]map[string]objectMatcher{},
-			trigger:   backend,
-			gvkLookup: backend,
-			scheme:    scheme,
-			store:     store,
-		},
 		save: save{
 			cache:  backend,
 			client: backend,
 		},
 		watching: map[schema.GroupVersionKind]bool{},
 	}
-	hs.triggers.watcher = hs
+	if dsn == "" {
+		hs.triggers = triggers.NewInMemory(scheme, backend, backend, hs)
+	} else {
+		var err error
+		hs.triggers, err = triggers.NewWithDSN(scheme, backend, backend, hs, dsn)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return hs, nil
 }
 
 func (m *HandlerSet) Start(ctx context.Context) error {
-	if m.ctx == nil {
-		m.ctx = ctx
-	}
+	m.setupContext(ctx)
+
 	if err := m.WatchGVK(m.handlers.GVKs()...); err != nil {
 		return err
 	}
@@ -97,13 +87,23 @@ func (m *HandlerSet) Start(ctx context.Context) error {
 }
 
 func (m *HandlerSet) Preload(ctx context.Context) error {
-	if m.ctx == nil {
-		m.ctx = ctx
-	}
+	m.setupContext(ctx)
+
 	if err := m.WatchGVK(m.handlers.GVKs()...); err != nil {
 		return err
 	}
 	return m.backend.Preload(ctx)
+}
+
+func (m *HandlerSet) setupContext(ctx context.Context) {
+	if m.ctx == nil {
+		m.ctx = ctx
+		context.AfterFunc(ctx, func() {
+			if err := m.triggers.Close(); err != nil {
+				log.Errorf("Error closing triggers: %v", err)
+			}
+		})
+	}
 }
 
 func toObject(obj runtime.Object) kclient.Object {
@@ -118,15 +118,15 @@ type triggerRegistry struct {
 	gvk     schema.GroupVersionKind
 	gvks    map[schema.GroupVersionKind]bool
 	key     string
-	trigger *triggers
+	trigger *triggers.Triggers
 }
 
 func (t *triggerRegistry) WatchingGVKs() []schema.GroupVersionKind {
 	return maps.Keys(t.gvks)
 
 }
-func (t *triggerRegistry) Watch(obj runtime.Object, namespace, name string, sel labels.Selector, fields fields.Selector) error {
-	gvk, ok, err := t.trigger.Register(t.gvk, t.key, obj, namespace, name, sel, fields)
+func (t *triggerRegistry) Watch(ctx context.Context, obj runtime.Object, namespace, name string, sel labels.Selector, fields fields.Selector) error {
+	gvk, ok, err := t.trigger.Register(ctx, t.gvk, t.key, obj, namespace, name, sel, fields)
 	if err != nil {
 		return err
 	}
@@ -150,7 +150,7 @@ func (m *HandlerSet) newRequestResponse(gvk schema.GroupVersionKind, key string,
 	triggerRegistry := &triggerRegistry{
 		gvk:     gvk,
 		key:     key,
-		trigger: &m.triggers,
+		trigger: m.triggers,
 		gvks:    map[schema.GroupVersionKind]bool{},
 	}
 
@@ -338,9 +338,9 @@ func (m *HandlerSet) handle(gvk schema.GroupVersionKind, key string, unmodifiedO
 
 	if unmodifiedObject == nil {
 		// A nil object here means that the object was deleted, so unregister the triggers
-		m.triggers.UnregisterAndTrigger(req)
-	} else {
-		m.triggers.Trigger(req)
+		m.triggers.UnregisterAndTrigger(req.Ctx, req.GVK, req.Key, req.Namespace, req.Name, req.Object)
+	} else if !req.FromTrigger {
+		m.triggers.Trigger(req.Ctx, req.GVK, req.Key, req.Namespace, req.Name, req.Object)
 	}
 
 	if handles {
